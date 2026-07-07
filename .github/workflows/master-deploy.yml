@@ -1,0 +1,90 @@
+name: Master Deploy Pipeline
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-and-verify:
+    name: Build & Verify (Next.js)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build project
+        run: npm run build
+
+  deploy-multi-platform:
+    name: Deploy to Vercel via DeployForge
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Package source files and deploy
+        run: |
+          node <<'EOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          const exts = ['.ts', '.tsx', '.js', '.jsx', '.json', '.css', '.md', '.html'];
+          const skipDirs = new Set(['node_modules', '.git', '.next', '.github']);
+
+          function walk(dir, files) {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              if (skipDirs.has(entry.name)) continue;
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                walk(full, files);
+              } else if (exts.includes(path.extname(entry.name))) {
+                files.push(full);
+              }
+            }
+          }
+
+          const filePaths = [];
+          walk('.', filePaths);
+
+          const files = filePaths.map((p) => ({
+            path: p.replace(/^\.\//, ''),
+            content: fs.readFileSync(p, 'utf-8'),
+          }));
+
+          const payload = JSON.stringify({
+            action: 'deployFiles',
+            projectName: process.env.GITHUB_REPO_NAME,
+            framework: 'nextjs',
+            files,
+          });
+
+          fs.writeFileSync('deploy_payload.json', payload);
+          console.log(`Packaged ${files.length} files for deployment.`);
+          EOF
+        env:
+          GITHUB_REPO_NAME: ${{ github.event.repository.name }}
+
+      - name: Trigger DeployForge deployment
+        run: |
+          curl -s -X POST "https://superagent-2286fb2f.base44.app/functions/deployforgeVercel" \
+            -H "Content-Type: application/json" \
+            --data-binary @deploy_payload.json
+
+      - name: Report status
+        run: echo "Master deploy pipeline complete for ${{ github.repository }} @ ${{ github.sha }}"
